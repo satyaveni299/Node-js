@@ -1,0 +1,192 @@
+const express = require('express')
+const app = express()
+const {open} = require('sqlite')
+const sqlite3 = require('sqlite3')
+const path = require('path')
+const dbpath = path.join(__dirname, 'covid19IndiaPortal.db')
+let db = null
+const bcrypt = require('bcrypt')
+const jwt = require('jsonwebtoken')
+
+app.use(express.json())
+const initializeDBAndServer = async (request, response) => {
+  db = await open({
+    filename: dbpath,
+    driver: sqlite3.Database,
+  })
+  app.listen(3000, () => {
+    console.log('server is running at http://localhost/:3000/')
+  })
+}
+initializeDBAndServer()
+
+app.post('/register', async (request, response) => {
+  const {username, name, password, gender, location} = request.body
+  const isAlreadyExistQuery = `SELECT * FROM user WHERE username='${username}';`
+  const dbUser = await db.get(isAlreadyExistQuery)
+  if (dbUser !== undefined) {
+    response.status = 400
+    response.send('User already exists')
+  } else {
+    const passLength = password.length
+    if (passLength < 5) {
+      response.status = 400
+      response.send('Password is too short')
+    } else {
+      const hashedPass = await bcrypt.hash(password, 10)
+      const insertQuery = `INSERT INTO user(username,name,password,gender,location)
+       VALUES
+      (
+        '${username}',
+        '${name}',
+        '${hashedPass}',
+        '${gender}',
+        '${location}'
+      );`
+      const res = await db.run(insertQuery)
+      response.status = 200
+      response.send('User created successfully')
+    }
+  }
+})
+app.post('/login/', async (request, response) => {
+  const {username, password} = request.body
+  const selectUserQuery = `SELECT * FROM user WHERE username = '${username}'`
+  const dbUser = await db.get(selectUserQuery)
+  if (dbUser === undefined) {
+    response.status(400)
+    response.send('Invalid User')
+  } else {
+    const isPasswordMatched = await bcrypt.compare(password, dbUser.password)
+    if (isPasswordMatched === true) {
+      const payload = {
+        username: username,
+      }
+      const jwtToken = jwt.sign(payload, 'MY_SECRET_TOKEN')
+      response.send({jwtToken})
+    } else {
+      response.status(400)
+      response.send('Invalid Password')
+    }
+  }
+})
+const verifyLoggedInUser = (request, response, next) => {
+  let jwtToken
+  const autheader = request.headers['authorization']
+  if (autheader !== undefined) {
+    jwtToken = autheader.split(' ')[1]
+  }
+  if (jwtToken === undefined) {
+    response.status(401)
+    response.send('Invalid JWT Token')
+  } else {
+    jwt.verify(jwtToken, 'MY_SECRET_TOKEN', async (error, payload) => {
+      if (error) {
+        response.send('Invalid Acces Token')
+      } else {
+        next()
+      }
+    })
+  }
+}
+const changeColumnNames = object => {
+  return {
+    stateId: object.state_id, // state_id should match your database column
+    stateName: object.state_name,
+    population: object.population,
+  }
+}
+
+app.get('/states/', verifyLoggedInUser, async (request, response) => {
+  const getstatesQuery = `
+            SELECT
+              *
+            FROM
+             state;`
+  const statesArray = await db.all(getstatesQuery)
+  const modifiedStatesArray = statesArray.map(eachObject =>
+    changeColumnNames(eachObject),
+  )
+
+  response.send(modifiedStatesArray)
+})
+app.get('/states/:stateId/', verifyLoggedInUser, async (request, response) => {
+  const {stateId} = request.params
+  const getQuery = `SELECT * FROM state WHERE state_id=${stateId};`
+  const state = await db.get(getQuery)
+  if (state) {
+    const modifiedState = changeColumnNames(state) // Transform the result
+    response.send(modifiedState)
+  } else {
+    response.status(404).send('State not found')
+  }
+})
+app.post('/districts/', verifyLoggedInUser, async (request, response) => {
+  const {districtName, stateId, cases, cured, active, deaths} = request.body
+  const createQuery = `INSERT INTO 
+  district(district_name,state_id,cases,cured,active,deaths)
+  VALUES
+  ('${districtName}',${stateId},${cases},${cured},${active},${deaths});`
+  await db.run(createQuery)
+  response.send('District Successfully Added')
+})
+app.get(
+  '/districts/:districtId/',
+  verifyLoggedInUser,
+  async (request, response) => {
+    const {districtId} = request.params
+    const getQuery = `SELECT 
+  district_id AS districtId,
+  district_name as districtName,
+  state_id AS stateId,
+  cases,cured,active,deaths
+  FROM district WHERE district_id=${districtId};`
+    const res = await db.all(getQuery)
+    response.send(res)
+  },
+)
+app.delete(
+  '/districts/:districtId/',
+  verifyLoggedInUser,
+  async (request, response) => {
+    const {districtId} = request.params
+    const query = `DELETE FROM district WHERE district_id=${districtId};`
+    const res = await db.run(query)
+    response.send('District Removed')
+  },
+)
+app.put(
+  '/districts/:districtId/',
+  verifyLoggedInUser,
+  async (request, response) => {
+    const {districtId} = request.params
+    const {districtName, stateId, cases, cured, active, deaths} = request.body
+    const updateQuery = `UPDATE district 
+  SET 
+  district_name='${districtName}',
+  state_id=${stateId},
+  cases=${cases},
+  cured=${cured},
+  active=${active},
+  deaths=${deaths}
+  WHERE district_id =${districtId};`
+    const res = await db.run(updateQuery)
+    response.send('District Details Updated')
+  },
+)
+app.get(
+  '/states/:stateId/stats/',
+  verifyLoggedInUser,
+  async (request, response) => {
+    const {stateId} = request.params
+    const statQuery = `SELECT
+   sum(cured)+sum(active)+sum(deaths) as totalCases,
+   sum(cured) as totalCured,
+   sum(active) as totalActive,
+   sum(deaths) as totalDeaths
+   FROM district WHERE state_id=${stateId};`
+    const res = await db.get(statQuery)
+    response.send(res)
+  },
+)
+module.exports = app
